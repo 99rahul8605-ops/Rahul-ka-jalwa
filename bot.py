@@ -637,11 +637,33 @@ async def handle_direct(send_fn, edit, url, tmp_dir, disk_only: bool = False,
             def readinto(self, b):
                 if cancel.is_set():
                     return 0          # signals EOF → Pyrogram/Telethon will stop
-                while not self._buf:
+                MAX_RETRIES = 5
+                for attempt in range(MAX_RETRIES):
                     try:
-                        self._buf = next(self._iter)
-                    except StopIteration:
-                        return 0      # EOF
+                        while not self._buf:
+                            try:
+                                self._buf = next(self._iter)
+                            except StopIteration:
+                                return 0      # EOF
+                        break  # got data
+                    except (requests.exceptions.ChunkedEncodingError,
+                            requests.exceptions.ConnectionError,
+                            requests.exceptions.Timeout) as e:
+                        if attempt >= MAX_RETRIES - 1:
+                            raise
+                        wait = min(2 ** (attempt + 1), 30)
+                        logger.warning(f"[DIRECT/stream] Broken at {human_size(self.uploaded)}, "
+                                       f"reconnecting in {wait}s (attempt {attempt+1}/{MAX_RETRIES}): {e}")
+                        time.sleep(wait)
+                        try: self._resp.close()
+                        except Exception: pass
+                        headers = {"Range": f"bytes={self.uploaded}-"}
+                        self._resp = http_get(url, stream=True, timeout=(10, 300),
+                                              allow_redirects=True, headers=headers)
+                        if self._resp.status_code not in (200, 206):
+                            self._resp = http_get(url, stream=True, timeout=(10, 300), allow_redirects=True)
+                        self._iter = self._resp.iter_content(chunk_size=512 * 1024)
+                        self._buf = b""
                 n = min(len(b), len(self._buf))
                 b[:n] = self._buf[:n]
                 self._buf = self._buf[n:]
@@ -687,12 +709,34 @@ async def handle_direct(send_fn, edit, url, tmp_dir, disk_only: bool = False,
             def readinto(self, b):
                 if cancel.is_set():
                     return 0
-                while not self._buf:
+                MAX_RETRIES = 5
+                for attempt in range(MAX_RETRIES):
                     try:
-                        self._buf = next(self._iter)
-                    except StopIteration:
-                        logger.info(f"[DIRECT] Stream EOF: {filename} total={human_size(self.uploaded)}")
-                        return 0
+                        while not self._buf:
+                            try:
+                                self._buf = next(self._iter)
+                            except StopIteration:
+                                logger.info(f"[DIRECT] Stream EOF: {filename} total={human_size(self.uploaded)}")
+                                return 0
+                        break  # got data
+                    except (requests.exceptions.ChunkedEncodingError,
+                            requests.exceptions.ConnectionError,
+                            requests.exceptions.Timeout) as e:
+                        if attempt >= MAX_RETRIES - 1:
+                            raise
+                        wait = min(2 ** (attempt + 1), 30)
+                        logger.warning(f"[DIRECT] Stream broken at {human_size(self.uploaded)}, "
+                                       f"reconnecting in {wait}s (attempt {attempt+1}/{MAX_RETRIES}): {e}")
+                        time.sleep(wait)
+                        try: self._resp.close()
+                        except Exception: pass
+                        headers = {"Range": f"bytes={self.uploaded}-"}
+                        self._resp = http_get(url, stream=True, timeout=(10, 300),
+                                              allow_redirects=True, headers=headers)
+                        if self._resp.status_code not in (200, 206):
+                            self._resp = http_get(url, stream=True, timeout=(10, 300), allow_redirects=True)
+                        self._iter = self._resp.iter_content(chunk_size=512 * 1024)
+                        self._buf = b""
                 n = min(len(b), len(self._buf))
                 b[:n] = self._buf[:n]
                 self._buf = self._buf[n:]
